@@ -21,8 +21,8 @@ with st.sidebar:
         "Anthropic API key (optional)",
         type="password",
         value=os.environ.get("ANTHROPIC_API_KEY", ""),
-        help=("Used for input classification, audio-feature estimation, mood "
-              "interpretation, and writing descriptions. Without a key the app "
+        help=("Used for audio-feature estimation on songs not in the catalog "
+              "and for writing the mood description. Without a key the app "
               "uses built-in mock responses so you can still see the pipeline."))
     if key_input:
         os.environ["ANTHROPIC_API_KEY"] = key_input
@@ -38,22 +38,20 @@ with st.sidebar:
         st.session_state["query"] = "https://open.spotify.com/track/23PvWFdi76vER4p1e2Xroj"
     if st.button("\U0001F3B6  drivers license (catalog)"):
         st.session_state["query"] = "drivers license by Olivia Rodrigo"
+    if st.button("\U0001F3B6  Take Me Out (catalog)"):
+        st.session_state["query"] = "Take Me Out by Franz Ferdinand"
     if st.button("\U0001F3B6  Espresso (AI estimate)"):
         st.session_state["query"] = "Espresso by Sabrina Carpenter"
-    if st.button("\U0001F61E  \"I'm drained from studying\""):
-        st.session_state["query"] = "I'm drained from reading these assignments"
-    if st.button("\U0001F389  \"feeling celebratory\""):
-        st.session_state["query"] = "I'm feeling celebratory after acing my exam"
 
 # ---- Header ----
 st.title("\U0001F3B5 Mood Predictor")
 st.write(
-    "Would you like to receive some song suggestions that will suit your mood? "
-    "Feel free to add a Spotify song URL that's been in your head, a song "
-    "and the artist that appeals to you in this moment, or describe your day "
-    "or feelings right now. I can predict your mood along with a description, "
-    "and then I will recommend a song that you might also want to listen to, "
-    "as well as a song that is opposite your mood to change your day.")
+    "Would you like to receive some song suggestions that suit your current "
+    "vibe? Drop in a Spotify song URL that's been in your head, or type a "
+    "song and the artist that appeals to you in this moment. I will predict "
+    "the song's mood with a description, then recommend a song you might "
+    "also want to listen to as well as a song that's the opposite of your "
+    "current mood — to change your day if you'd like.")
 
 @st.cache_resource
 def _warm_up():
@@ -65,9 +63,9 @@ _warm_up()
 # ---- Input ----
 default_query = st.session_state.get("query", "")
 query = st.text_input(
-    "Your input",
+    "Your song",
     value=default_query,
-    placeholder="\"Mr. Brightside by The Killers\"  /  Spotify URL  /  \"I'm drained from studying\"",
+    placeholder="\"Mr. Brightside by The Killers\"  /  Spotify URL  /  \"Title - Artist\"",
 )
 go = st.button("Go", type="primary")
 
@@ -99,7 +97,7 @@ def plot_mood_space(highlight_points):
 
 # ---- Main flow ----
 if go and query.strip():
-    with st.spinner("Routing your input through the pipeline..."):
+    with st.spinner("Looking up the track and running your XGBoost model..."):
         try:
             result = engine.predict(query.strip())
         except Exception as e:
@@ -110,122 +108,80 @@ if go and query.strip():
         st.warning(result["error"])
         st.stop()
 
-    # MOOD RESULT
-    if result["kind"] == "mood":
-        t = result["target"]
-        st.subheader("\U0001F4A4 You described a mood")
-        st.write(f"**Your input:** “{result['mood_text']}”")
-        if result.get("interpreted_summary"):
-            st.caption(f"Interpreted as: *{result['interpreted_summary']}*")
+    p = result["predicted"]
+    col_song, col_mood = st.columns([1.1, 1])
+    with col_song:
+        st.subheader(f"“{result['title']}”")
+        st.write(f"by **{result['artist']}**  ·  genre: *{result['genre']}*")
+        if result["source"] == "catalog":
+            st.caption("✅ Found in catalog — prediction was pre-computed by your XGBoost model")
+        else:
+            st.caption("\U0001F916 Not in catalog — Claude estimated audio features, your XGBoost predicted the mood")
+    with col_mood:
+        m1, m2 = st.columns(2)
+        m1.metric("Valence (sad ↔ happy)",  f"{p['valence']:.3f}")
+        m2.metric("Energy (calm ↔ intense)", f"{p['energy']:.3f}")
+        st.markdown(f"**Mood quadrant:** {p['quadrant']}")
+        if "ground_truth" in result:
+            gt = result["ground_truth"]
+            st.caption(f"Spotify's true values: valence={gt['valence']}, energy={gt['energy']}")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Target valence", f"{t['valence']:.2f}")
-        c2.metric("Target energy",  f"{t['energy']:.2f}")
-        c3.metric("Quadrant", t["quadrant"])
+    st.subheader("Where the song lives in the 2D mood space")
+    highlights = [
+        (f"your song ({result['title']})", p["valence"], p["energy"], "#264653", "*", 240),
+    ]
+    if result.get("match_recommendation"):
+        mr = result["match_recommendation"]
+        highlights.append((f"match: {mr['title']}", mr["valence"], mr["energy"], "#2A9D8F", "o", 140))
+    if result.get("contrast_recommendation"):
+        cr = result["contrast_recommendation"]
+        highlights.append((f"contrast: {cr['title']}", cr["valence"], cr["energy"], "#E76F51", "o", 140))
+    st.pyplot(plot_mood_space(highlights))
 
-        st.subheader("Where your mood lands in the 2D plane")
-        highlights = [("your mood", t["valence"], t["energy"], "#264653", "*", 240)]
-        for i, r in enumerate(result["recommendations"]):
-            highlights.append(
-                (f"rec #{i+1}: {r['title']}", r["valence"], r["energy"],
-                 ["#2A9D8F", "#E9C46A", "#F4A261"][i % 3], "o", 130))
-        st.pyplot(plot_mood_space(highlights))
+    st.subheader("Recommendations")
+    rec_a, rec_b = st.columns(2)
+    if result.get("match_recommendation"):
+        mr = result["match_recommendation"]
+        with rec_a:
+            st.markdown("**\U0001F7E2 Mood match — lean in**")
+            st.markdown(f"“**{mr['title']}**”  by *{mr['artist']}*")
+            st.caption(f"valence {mr['valence']}  ·  energy {mr['energy']}")
+    if result.get("contrast_recommendation"):
+        cr = result["contrast_recommendation"]
+        with rec_b:
+            st.markdown("**\U0001F7E0 Mood contrast — pull yourself out**")
+            st.markdown(f"“**{cr['title']}**”  by *{cr['artist']}*")
+            st.caption(f"valence {cr['valence']}  ·  energy {cr['energy']}")
 
-        st.subheader("Songs picked for this mood")
-        for r in result["recommendations"]:
+    st.subheader("How this song feels")
+    st.write(result["description"])
+
+    if "estimated_features" in result:
+        with st.expander("AI-estimated audio features (input to your XGBoost)"):
+            ef = result["estimated_features"]
+            st.dataframe(pd.DataFrame.from_records([ef]).T.rename(
+                columns={0: "estimated"}), use_container_width=True)
+
+    with st.expander("How this prediction was made"):
+        if result["source"] == "catalog":
             st.markdown(
-                f"- **“{r['title']}”** by *{r['artist']}*  "
-                f"<span style='color:#777'>(v={r['valence']}, e={r['energy']})</span>",
-                unsafe_allow_html=True)
-
-        st.subheader("Why these picks")
-        st.write(result["description"])
-
-        with st.expander("How this prediction was made"):
+                "1. **Input parsed** as a track lookup (URL or song-name fuzzy match)\n"
+                "2. **Catalog hit** in our pre-computed 89,579-track table\n"
+                "3. The (valence, energy) shown was produced by **your XGBoost models** "
+                "when we built the catalog\n"
+                "4. **NearestNeighbors** picked match + contrast\n"
+                "5. **Claude wrote** the description")
+        else:
             st.markdown(
-                "1. **Claude classified** your input as a mood description (not a song)\n"
-                "2. **Claude mapped** the mood text to a target (valence, energy) "
-                f"= ({t['valence']}, {t['energy']}) on the Russell circumplex\n"
-                "3. **NearestNeighbors** over the catalog's predicted-(v, e) plane "
-                "(every entry produced by your XGBoost) returned the closest 3 songs\n"
-                "4. **Claude wrote** the rationale paragraph above")
-
-    # SONG RESULT
-    elif result["kind"] == "song":
-        p = result["predicted"]
-        col_song, col_mood = st.columns([1.1, 1])
-        with col_song:
-            st.subheader(f"“{result['title']}”")
-            st.write(f"by **{result['artist']}**  ·  genre: *{result['genre']}*")
-            if result["source"] == "catalog":
-                st.caption("✅ Found in catalog — prediction was pre-computed by your XGBoost model")
-            else:
-                st.caption("\U0001F916 Not in catalog — Claude estimated audio features, your XGBoost predicted the mood")
-        with col_mood:
-            m1, m2 = st.columns(2)
-            m1.metric("Valence (sad ↔ happy)",  f"{p['valence']:.3f}")
-            m2.metric("Energy (calm ↔ intense)", f"{p['energy']:.3f}")
-            st.markdown(f"**Mood quadrant:** {p['quadrant']}")
-            if "ground_truth" in result:
-                gt = result["ground_truth"]
-                st.caption(f"Spotify's true values: valence={gt['valence']}, energy={gt['energy']}")
-
-        st.subheader("Where the song lives in the 2D mood space")
-        highlights = [
-            (f"your song ({result['title']})", p["valence"], p["energy"], "#264653", "*", 240),
-        ]
-        if result.get("match_recommendation"):
-            mr = result["match_recommendation"]
-            highlights.append((f"match: {mr['title']}", mr["valence"], mr["energy"], "#2A9D8F", "o", 140))
-        if result.get("contrast_recommendation"):
-            cr = result["contrast_recommendation"]
-            highlights.append((f"contrast: {cr['title']}", cr["valence"], cr["energy"], "#E76F51", "o", 140))
-        st.pyplot(plot_mood_space(highlights))
-
-        st.subheader("Recommendations")
-        rec_a, rec_b = st.columns(2)
-        if result.get("match_recommendation"):
-            mr = result["match_recommendation"]
-            with rec_a:
-                st.markdown("**\U0001F7E2 Mood match — lean in**")
-                st.markdown(f"“**{mr['title']}**”  by *{mr['artist']}*")
-                st.caption(f"valence {mr['valence']}  ·  energy {mr['energy']}")
-        if result.get("contrast_recommendation"):
-            cr = result["contrast_recommendation"]
-            with rec_b:
-                st.markdown("**\U0001F7E0 Mood contrast — pull yourself out**")
-                st.markdown(f"“**{cr['title']}**”  by *{cr['artist']}*")
-                st.caption(f"valence {cr['valence']}  ·  energy {cr['energy']}")
-
-        st.subheader("How this song feels")
-        st.write(result["description"])
-
-        if "estimated_features" in result:
-            with st.expander("AI-estimated audio features (input to your XGBoost)"):
-                ef = result["estimated_features"]
-                st.dataframe(pd.DataFrame.from_records([ef]).T.rename(
-                    columns={0: "estimated"}), use_container_width=True)
-
-        with st.expander("How this prediction was made"):
-            if result["source"] == "catalog":
-                st.markdown(
-                    "1. **Input parsed** as a track lookup (URL or song-name fuzzy match)\n"
-                    "2. **Catalog hit** in our pre-computed 89,579-track table\n"
-                    "3. The (valence, energy) shown was produced by **your XGBoost models** "
-                    "when we built the catalog\n"
-                    "4. **NearestNeighbors** picked match + contrast\n"
-                    "5. **Claude wrote** the description")
-            else:
-                st.markdown(
-                    f"1. **Input parsed** as `\"{result['title']}\" by {result['artist']}`\n"
-                    "2. Not found in the catalog\n"
-                    "3. **Claude estimated** 14 raw audio features\n"
-                    "4. Same engineered feature pipeline as training (genre encoder, "
-                    "artist encoder, key/ts one-hots, log1p_duration)\n"
-                    "5. **Your XGBoost models** ran on those features → (valence, energy)\n"
-                    "6. **NearestNeighbors** picked match + contrast\n"
-                    "7. **Claude wrote** the description")
+                f"1. **Input parsed** as `\"{result['title']}\" by {result['artist']}`\n"
+                "2. Not found in the catalog\n"
+                "3. **Claude estimated** 14 raw audio features\n"
+                "4. Same engineered feature pipeline as training (genre encoder, "
+                "artist encoder, key/ts one-hots, log1p_duration)\n"
+                "5. **Your XGBoost models** ran on those features → (valence, energy)\n"
+                "6. **NearestNeighbors** picked match + contrast\n"
+                "7. **Claude wrote** the description")
 
 else:
-    st.info("Paste anything above to get started, or click an example in the sidebar. "
-            "The app accepts Spotify URLs, song names, or mood descriptions.")
+    st.info("Paste a Spotify URL or type a song name (e.g. \"Mr. Brightside by The Killers\") to get started, "
+            "or click an example in the sidebar.")
