@@ -47,8 +47,13 @@ with st.sidebar:
 
 # ---- Header ----
 st.title("\U0001F3B5 Mood Predictor")
-st.caption("Three things in one box: paste a Spotify URL, type \"Title by Artist\", "
-           "or describe how you feel \u2014 the app figures out which.")
+st.write(
+    "Would you like to receive some song suggestions that will suit your mood? "
+    "Feel free to add a Spotify song URL that's been in your head, a song "
+    "and the artist that appeals to you in this moment, or describe your day "
+    "or feelings right now. I can predict your mood along with a description, "
+    "and then I will recommend a song that you might also want to listen to, "
+    "as well as a song that is opposite your mood to change your day.")
 
 @st.cache_resource
 def _warm_up():
@@ -84,8 +89,8 @@ def plot_mood_space(highlight_points):
                       (0.06, 0.04, "sad / melancholic"),
                       (0.78, 0.04, "peaceful / content")]:
         ax.text(x, y, lbl, fontsize=9, color="#666", ha="left", va="center")
-    ax.set_xlabel("valence  (sad \u2190\u2192 happy)")
-    ax.set_ylabel("energy   (calm \u2190\u2192 intense)")
+    ax.set_xlabel("valence  (sad ←→ happy)")
+    ax.set_ylabel("energy   (calm ←→ intense)")
     ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_aspect("equal")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10),
               ncol=2, fontsize=9, frameon=False)
@@ -101,18 +106,15 @@ if go and query.strip():
             st.error(f"Something went wrong: {type(e).__name__}: {e}")
             st.stop()
 
-    # ----- Error / unparseable -----
     if result.get("kind") == "error" or "error" in result:
         st.warning(result["error"])
         st.stop()
 
-    # =================================================================
-    # MOOD RESULT (user described how they feel)
-    # =================================================================
+    # MOOD RESULT
     if result["kind"] == "mood":
         t = result["target"]
         st.subheader("\U0001F4A4 You described a mood")
-        st.write(f"**Your input:** \u201c{result['mood_text']}\u201d")
+        st.write(f"**Your input:** “{result['mood_text']}”")
         if result.get("interpreted_summary"):
             st.caption(f"Interpreted as: *{result['interpreted_summary']}*")
 
@@ -132,7 +134,7 @@ if go and query.strip():
         st.subheader("Songs picked for this mood")
         for r in result["recommendations"]:
             st.markdown(
-                f"- **\u201c{r['title']}\u201d** by *{r['artist']}*  "
+                f"- **“{r['title']}”** by *{r['artist']}*  "
                 f"<span style='color:#777'>(v={r['valence']}, e={r['energy']})</span>",
                 unsafe_allow_html=True)
 
@@ -146,26 +148,23 @@ if go and query.strip():
                 f"= ({t['valence']}, {t['energy']}) on the Russell circumplex\n"
                 "3. **NearestNeighbors** over the catalog's predicted-(v, e) plane "
                 "(every entry produced by your XGBoost) returned the closest 3 songs\n"
-                "4. **Claude wrote** the rationale paragraph above"
-            )
+                "4. **Claude wrote** the rationale paragraph above")
 
-    # =================================================================
-    # SONG RESULT (user gave a URL, song name, etc.)
-    # =================================================================
+    # SONG RESULT
     elif result["kind"] == "song":
         p = result["predicted"]
         col_song, col_mood = st.columns([1.1, 1])
         with col_song:
-            st.subheader(f"\u201c{result['title']}\u201d")
+            st.subheader(f"“{result['title']}”")
             st.write(f"by **{result['artist']}**  ·  genre: *{result['genre']}*")
             if result["source"] == "catalog":
-                st.caption("\u2705 Found in catalog \u2014 prediction was pre-computed by your XGBoost model")
+                st.caption("✅ Found in catalog — prediction was pre-computed by your XGBoost model")
             else:
-                st.caption("\U0001F916 Not in catalog \u2014 Claude estimated audio features, your XGBoost predicted the mood")
+                st.caption("\U0001F916 Not in catalog — Claude estimated audio features, your XGBoost predicted the mood")
         with col_mood:
             m1, m2 = st.columns(2)
-            m1.metric("Valence (sad \u2194 happy)",  f"{p['valence']:.3f}")
-            m2.metric("Energy (calm \u2194 intense)", f"{p['energy']:.3f}")
+            m1.metric("Valence (sad ↔ happy)",  f"{p['valence']:.3f}")
+            m2.metric("Energy (calm ↔ intense)", f"{p['energy']:.3f}")
             st.markdown(f"**Mood quadrant:** {p['quadrant']}")
             if "ground_truth" in result:
                 gt = result["ground_truth"]
@@ -188,14 +187,14 @@ if go and query.strip():
         if result.get("match_recommendation"):
             mr = result["match_recommendation"]
             with rec_a:
-                st.markdown("**\U0001F7E2 Mood match \u2014 lean in**")
-                st.markdown(f"\u201c**{mr['title']}**\u201d  by *{mr['artist']}*")
+                st.markdown("**\U0001F7E2 Mood match — lean in**")
+                st.markdown(f"“**{mr['title']}**”  by *{mr['artist']}*")
                 st.caption(f"valence {mr['valence']}  ·  energy {mr['energy']}")
         if result.get("contrast_recommendation"):
             cr = result["contrast_recommendation"]
             with rec_b:
-                st.markdown("**\U0001F7E0 Mood contrast \u2014 pull yourself out**")
-                st.markdown(f"\u201c**{cr['title']}**\u201d  by *{cr['artist']}*")
+                st.markdown("**\U0001F7E0 Mood contrast — pull yourself out**")
+                st.markdown(f"“**{cr['title']}**”  by *{cr['artist']}*")
                 st.caption(f"valence {cr['valence']}  ·  energy {cr['energy']}")
 
         st.subheader("How this song feels")
@@ -215,8 +214,7 @@ if go and query.strip():
                     "3. The (valence, energy) shown was produced by **your XGBoost models** "
                     "when we built the catalog\n"
                     "4. **NearestNeighbors** picked match + contrast\n"
-                    "5. **Claude wrote** the description"
-                )
+                    "5. **Claude wrote** the description")
             else:
                 st.markdown(
                     f"1. **Input parsed** as `\"{result['title']}\" by {result['artist']}`\n"
@@ -224,10 +222,9 @@ if go and query.strip():
                     "3. **Claude estimated** 14 raw audio features\n"
                     "4. Same engineered feature pipeline as training (genre encoder, "
                     "artist encoder, key/ts one-hots, log1p_duration)\n"
-                    "5. **Your XGBoost models** ran on those features \u2192 (valence, energy)\n"
+                    "5. **Your XGBoost models** ran on those features → (valence, energy)\n"
                     "6. **NearestNeighbors** picked match + contrast\n"
-                    "7. **Claude wrote** the description"
-                )
+                    "7. **Claude wrote** the description")
 
 else:
     st.info("Paste anything above to get started, or click an example in the sidebar. "
