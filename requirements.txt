@@ -5,3 +5,4 @@ pandas>=2.0
 numpy>=1.24
 matplotlib>=3.7
 anthropic>=0.40
+rapidfuzz>=3.0

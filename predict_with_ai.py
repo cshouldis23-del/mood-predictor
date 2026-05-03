@@ -1,11 +1,8 @@
-"""Mood prediction with input routing.
+"""Mood prediction from a song reference (Spotify URL or "Title by Artist").
 
-Three input modes, auto-detected:
-  1. Spotify URL or track ID            -> catalog lookup, else AI estimate
-  2. "Title by Artist" / "Title - Artist" -> fuzzy catalog match, else AI estimate
-  3. Free-form mood text                  -> mood -> target (v, e) -> recommendations
-
-Garbage input returns a friendly error instead of fake predictions.
+Catalog hit -> stored XGBoost prediction. Catalog miss -> Claude estimates
+audio features, XGBoost predicts mood. Either way, Claude writes a mood
+description and rationales for the recommendations.
 """
 import os, re, sys, json, html, urllib.request
 import numpy as np
@@ -67,7 +64,7 @@ def fetch_spotify_metadata(track_id):
     if not title or not desc: return None
     title_text = html.unescape(title.group(1))
     desc_text  = html.unescape(desc.group(1))
-    parts = [p.strip() for p in re.split(r"\u00b7|\\|", desc_text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"·|\\|", desc_text) if p.strip()]
     artist = parts[1] if len(parts) >= 2 else ""
     return {"title": title_text, "artist": artist}
 
@@ -75,36 +72,57 @@ def _tokenize(s):
     s = re.sub(r"[\s\W_]+", " ", s.lower()).strip()
     return [t for t in s.split() if len(t) > 1]
 
-def fuzzy_catalog_lookup(query):
-    catalog = load_catalog()
-    title_q, artist_q = None, None
-    if re.search(r"\s+by\s+", query, re.I):
-        a, b = re.split(r"\s+by\s+", query, maxsplit=1, flags=re.I)
-        title_q, artist_q = a, b
-    elif " - " in query:
-        a, b = query.split(" - ", 1)
-        title_q, artist_q = a, b
-    title_tokens  = _tokenize(title_q  or query)
-    artist_tokens = _tokenize(artist_q or "")
-    if not title_tokens: return None
-    titles  = catalog["track_name"].fillna("").str.lower().values
-    artists = catalog["artists"].fillna("").str.lower().values
-    title_hits = np.ones(len(catalog), dtype=bool)
-    for t in title_tokens:
-        title_hits &= np.array([t in name for name in titles])
-    if not title_hits.any(): return None
-    cand_idx = np.where(title_hits)[0]
-    if artist_tokens:
-        ok = []
-        for i in cand_idx:
-            blob = artists[i]
-            if sum(t in blob for t in artist_tokens) >= 1:
-                ok.append(i)
-        if not ok: return None
-        return catalog.iloc[int(ok[0])]
-    return catalog.iloc[int(cand_idx[0])]
+_search_blobs = None  # populated lazily
 
-# --------- Claude ---------
+def _get_search_blobs():
+    """Cache a lowercase 'title artist' string per catalog row for fuzzy search."""
+    global _search_blobs
+    if _search_blobs is None:
+        catalog = load_catalog()
+        first_artist = catalog["artists"].fillna("").astype(str).str.split(";").str[0]
+        blobs = (catalog["track_name"].fillna("").astype(str) + " " + first_artist)
+        _search_blobs = blobs.str.lower().str.replace(r"[^\w\s]", " ", regex=True).str.strip().values
+    return _search_blobs
+
+def fuzzy_catalog_lookup(query):
+    """Match free-form queries to the catalog. Handles:
+      - typos / misspellings (Levenshtein-style)
+      - missing 'by'/'-' separators
+      - reversed token order ('olivia rodrigo drivers license')
+      - extra/missing punctuation
+    Returns None if no candidate scores above the threshold."""
+    from rapidfuzz import process, fuzz
+    catalog = load_catalog()
+    blobs = _get_search_blobs()
+
+    # Strip common separators so 'Title by Artist' and 'Title - Artist' both
+    # collapse into a clean 'title artist' phrase
+    q = re.sub(r"\s+by\s+", " ", query, flags=re.I)
+    q = q.replace(" - ", " ")
+    q = re.sub(r"[^\w\s]", " ", q).strip().lower()
+    if not q:
+        return None
+
+    # WRatio = best general-purpose scorer; tolerates word reordering, typos,
+    # partial matches. score_cutoff filters out non-matches.
+    # Get top-15 candidates, then break ties by popularity so common queries
+    # like "drivers license" go to Olivia Rodrigo's original instead of an
+    # obscure cover with the same title.
+    candidates = process.extract(q, blobs, scorer=fuzz.WRatio,
+                                  limit=15, score_cutoff=72)
+    if not candidates:
+        return None
+    # candidates: list of (matched_string, score, idx)
+    # Among the top-scoring batch (score within 8 points of best), pick highest popularity
+    top_score = candidates[0][1]
+    short_list = [c for c in candidates if c[1] >= top_score - 8]
+    has_pop = "popularity" in catalog.columns
+    if has_pop and len(short_list) > 1:
+        short_list.sort(key=lambda c: (-int(catalog.iloc[c[2]].get("popularity", 0)),
+                                        -c[1]))
+    return catalog.iloc[int(short_list[0][2])]
+
+# ---------------- Claude ----------------
 def claude_call(prompt, max_tokens=600, system=None):
     if USE_MOCK_AI:
         return _mock_claude(prompt)
@@ -118,21 +136,6 @@ def claude_call(prompt, max_tokens=600, system=None):
 
 def _mock_claude(prompt):
     p = prompt.lower()
-    if "classify" in p:
-        m = re.search(r'input:\s*"""(.+?)"""', prompt, re.DOTALL | re.IGNORECASE)
-        ui = (m.group(1) if m else "").lower().strip()
-        if len(ui) < 3:
-            return '{"kind":"unparseable"}'
-        if any(w in ui for w in [" by ", " - ", "spotify"]):
-            return '{"kind":"song"}'
-        if re.search(r"\bi('m| am|\s)|feeling|feel\s|tired|drained|happy|sad|"
-                     r"angry|excited|stressed|exhausted|calm|content|joyful|"
-                     r"melancho|anxious|lonely|burnt|burned|down\b|frustrat",
-                     ui):
-            return '{"kind":"mood"}'
-        if re.search(r"[a-z]{3,}\s+[a-z]{3,}", ui):
-            return '{"kind":"song"}'
-        return '{"kind":"unparseable"}'
     if "estimate" in p and "json" in p:
         return json.dumps({
             "danceability": 0.7, "energy": 0.78, "loudness": -5.2,
@@ -141,34 +144,9 @@ def _mock_claude(prompt):
             "time_signature": 4, "duration_ms": 175000,
             "explicit": False, "popularity": 80, "track_genre": "pop",
         })
-    if "russell circumplex" in p and "summary" in p:
-        return '{"valence":0.30,"energy":0.25,"summary":"low-energy and slightly down"}'
     return ("[mock description] This song sits in a particular corner of the mood "
             "plane.\n\n[mock match rationale] Same emotional zone.\n\n"
             "[mock contrast rationale] Diagonally opposite in mood.")
-
-def claude_classify_input(query):
-    prompt = (
-        "Classify this user input for a music recommendation app. Output ONLY a "
-        'JSON object {"kind":"song"|"mood"|"unparseable"}.\n\n'
-        '- "song": refers to a specific song (a title, artist+title, Spotify URL, '
-        'or commonly known song name)\n'
-        '- "mood": describes how the person feels right now '
-        '(e.g. "I\'m drained", "feeling happy", "stressed about exams")\n'
-        '- "unparseable": gibberish, empty, or unrelated\n\n'
-        f'Input: """{query}"""\n\nOutput:')
-    text = claude_call(prompt, max_tokens=60,
-                       system="You classify user input. Output only JSON.")
-    m = re.search(r'\{.*?\}', text, re.DOTALL)
-    if not m: return "unparseable"
-    try:
-        data = json.loads(m.group(0))
-        kind = data.get("kind", "unparseable")
-        if kind not in ("song", "mood", "unparseable"):
-            return "unparseable"
-        return kind
-    except Exception:
-        return "unparseable"
 
 def claude_estimate_features(artist, title):
     prompt = (
@@ -196,25 +174,6 @@ def claude_estimate_features(artist, title):
     if m: text = m.group(0)
     return json.loads(text)
 
-def claude_mood_to_coords(mood_text):
-    prompt = (
-        f"A user describes their mood as: \"{mood_text}\"\n\n"
-        "Map this to coordinates on the Russell circumplex of affect. Output ONLY "
-        'a JSON object: {"valence": 0.0-1.0, "energy": 0.0-1.0, "summary": "<one '
-        'short phrase>"}\n\n'
-        "Reference points:\n"
-        '  "exhausted, drained" -> valence 0.30, energy 0.20\n'
-        '  "sad, lonely"        -> valence 0.20, energy 0.35\n'
-        '  "calm, content"      -> valence 0.65, energy 0.30\n'
-        '  "joyful, ecstatic"   -> valence 0.85, energy 0.90\n'
-        '  "angry, frustrated"  -> valence 0.20, energy 0.85\n'
-        '  "anxious, stressed"  -> valence 0.30, energy 0.70')
-    text = claude_call(prompt, max_tokens=120,
-        system="You map mood to Russell circumplex coords. Output only JSON.")
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m: raise ValueError("Couldn't parse mood JSON")
-    return json.loads(m.group(0))
-
 def claude_describe_mood(artist, title, v, e, match_rec, contrast_rec):
     prompt = (
         f"\"{title}\" by {artist} maps to valence={v:.2f}, energy={e:.2f} "
@@ -227,19 +186,7 @@ def claude_describe_mood(artist, title, v, e, match_rec, contrast_rec):
         "is a good mood-CONTRAST recommendation.")
     return claude_call(prompt, max_tokens=350)
 
-def claude_describe_mood_recs(mood_text, v, e, recs):
-    rec_list = "\n".join(
-        f"  - \"{r['title']}\" by {r['artist']} (v={r['valence']}, e={r['energy']})"
-        for r in recs[:3])
-    prompt = (
-        f"User's mood: \"{mood_text}\"\n"
-        f"Mapped to valence={v:.2f}, energy={e:.2f} (quadrant: \"{quadrant(v, e)}\")\n"
-        f"Recommended songs:\n{rec_list}\n\n"
-        "Write a short, warm paragraph (3-4 sentences) explaining why these "
-        "recommendations fit the user's mood. Plain text, no headers.")
-    return claude_call(prompt, max_tokens=250)
-
-# --------- Feature pipeline ---------
+# ---------------- Feature pipeline ----------------
 def features_dict_to_X(feats, artist):
     load_models()
     f = dict(feats)
@@ -288,12 +235,12 @@ def find_recommendations(pv, pe, exclude_artist=None, exclude_track_id=None, k=3
         if len(out) >= k: break
     return out
 
-# --------- Public entry ---------
+# ---------------- Public entry ----------------
 def predict(query):
     catalog = load_catalog()
     q = (query or "").strip()
     if not q:
-        return {"kind": "error", "error": "Please type something."}
+        return {"kind": "error", "error": "Please enter a song name or Spotify URL."}
 
     track_id = extract_track_id(q)
     if track_id:
@@ -303,40 +250,34 @@ def predict(query):
         meta = fetch_spotify_metadata(track_id)
         if not meta:
             return {"kind": "error",
-                    "error": f"Track {track_id} isn't in our 89.5k catalog and "
-                             "we couldn't reach open.spotify.com to look it up. "
-                             "Try typing the song's title and artist instead."}
+                    "error": f"Track {track_id} isn't in our 89.5k catalog and we "
+                             "couldn't reach open.spotify.com to look it up. Try "
+                             "typing the song's title and artist instead, like "
+                             "\"Mr. Brightside by The Killers\"."}
         return _ai_song_path(meta["artist"], meta["title"])
 
     fuzzy = fuzzy_catalog_lookup(q)
     if fuzzy is not None:
         return _build_song_result_from_catalog(fuzzy)
 
-    kind = claude_classify_input(q)
-    if kind == "song":
-        artist, title = "", q
-        if re.search(r"\s+by\s+", q, re.I):
-            t, a = re.split(r"\s+by\s+", q, maxsplit=1, flags=re.I)
-            title, artist = t.strip(), a.strip()
-        elif " - " in q:
-            a, b = q.split(" - ", 1)
-            title, artist = a.strip(), b.strip()
-        return _ai_song_path(artist, title)
-    if kind == "mood":
-        return _mood_path(q)
-
-    return {"kind": "error",
-            "error": "I couldn't tell what you meant. Try one of these:\n"
-                     "  - a Spotify track URL\n"
-                     "  - a song name like \"Mr. Brightside by The Killers\"\n"
-                     "  - how you feel like \"I'm exhausted from studying\""}
+    # Catalog miss -- route to AI feature estimation. Try to split into
+    # title + artist if a 'by' or ' - ' separator is present; otherwise
+    # pass the whole string as the title and let Claude figure it out.
+    title, artist = q, ""
+    if re.search(r"\s+by\s+", q, re.I):
+        t, a = re.split(r"\s+by\s+", q, maxsplit=1, flags=re.I)
+        title, artist = t.strip(), a.strip()
+    elif " - " in q:
+        a, b = q.split(" - ", 1)
+        title, artist = a.strip(), b.strip()
+    return _ai_song_path(artist, title)
 
 def _build_song_result_from_catalog(row):
     pv, pe = float(row["pred_valence"]), float(row["pred_energy"])
-    recs = find_recommendations(pv, pe, row["artists"], row["track_id"], k=1)
-    contrast = find_recommendations(1 - pv, 1 - pe, row["artists"], row["track_id"], k=1)
-    mr = recs[0] if recs else None
-    cr = contrast[0] if contrast else None
+    matches  = find_recommendations(pv, pe, row["artists"], row["track_id"], k=1)
+    contrasts = find_recommendations(1 - pv, 1 - pe, row["artists"], row["track_id"], k=1)
+    mr = matches[0] if matches else None
+    cr = contrasts[0] if contrasts else None
     desc = claude_describe_mood(
         row["artists"], row["track_name"], pv, pe,
         {"artist": mr["artists"], "title": mr["track_name"]} if mr is not None else {"artist":"","title":""},
@@ -349,7 +290,7 @@ def _build_song_result_from_catalog(row):
                       "quadrant": quadrant(pv, pe)},
         "ground_truth": {"valence": round(float(row["valence_true"]), 3),
                          "energy":  round(float(row["energy_true"]),  3)},
-        "match_recommendation": _row_to_rec(mr) if mr is not None else None,
+        "match_recommendation":    _row_to_rec(mr) if mr is not None else None,
         "contrast_recommendation": _row_to_rec(cr) if cr is not None else None,
         "description": desc,
     }
@@ -359,10 +300,10 @@ def _ai_song_path(artist, title):
         return {"kind": "error", "error": "I couldn't extract an artist or title."}
     feats = claude_estimate_features(artist, title)
     pv, pe = predict_from_features(feats, artist)
-    recs     = find_recommendations(pv, pe, exclude_artist=artist, k=1)
-    contrast = find_recommendations(1 - pv, 1 - pe, exclude_artist=artist, k=1)
-    mr = recs[0] if recs else None
-    cr = contrast[0] if contrast else None
+    matches  = find_recommendations(pv, pe, exclude_artist=artist, k=1)
+    contrasts = find_recommendations(1 - pv, 1 - pe, exclude_artist=artist, k=1)
+    mr = matches[0] if matches else None
+    cr = contrasts[0] if contrasts else None
     desc = claude_describe_mood(
         artist, title, pv, pe,
         {"artist": mr["artists"], "title": mr["track_name"]} if mr is not None else {"artist":"","title":""},
@@ -374,26 +315,8 @@ def _ai_song_path(artist, title):
         "predicted": {"valence": round(pv, 3), "energy": round(pe, 3),
                       "quadrant": quadrant(pv, pe)},
         "estimated_features": feats,
-        "match_recommendation": _row_to_rec(mr) if mr is not None else None,
+        "match_recommendation":    _row_to_rec(mr) if mr is not None else None,
         "contrast_recommendation": _row_to_rec(cr) if cr is not None else None,
-        "description": desc,
-    }
-
-def _mood_path(mood_text):
-    coords = claude_mood_to_coords(mood_text)
-    pv = float(np.clip(coords["valence"], 0, 1))
-    pe = float(np.clip(coords["energy"],  0, 1))
-    summary = coords.get("summary", "")
-    recs = find_recommendations(pv, pe, k=3)
-    desc = claude_describe_mood_recs(mood_text, pv, pe,
-        [_row_to_rec(r) for r in recs])
-    return {
-        "kind": "mood",
-        "mood_text": mood_text,
-        "interpreted_summary": summary,
-        "target": {"valence": round(pv, 3), "energy": round(pe, 3),
-                   "quadrant": quadrant(pv, pe)},
-        "recommendations": [_row_to_rec(r) for r in recs],
         "description": desc,
     }
 
@@ -405,23 +328,10 @@ def _row_to_rec(r):
 def pretty_print(result):
     if result.get("kind") == "error" or "error" in result:
         print(f"\n{result['error']}\n"); return
-    if result["kind"] == "mood":
-        t = result["target"]
-        print(f"\nYour mood: \"{result['mood_text']}\"")
-        if result.get("interpreted_summary"):
-            print(f"  interpreted as: {result['interpreted_summary']}")
-        print(f"  mapped to valence={t['valence']}, energy={t['energy']} ({t['quadrant']})")
-        print("\nRecommendations:")
-        for r in result["recommendations"]:
-            print(f"  \"{r['title']}\" by {r['artist']}  (v={r['valence']}, e={r['energy']})")
-        print(f"\n{result['description']}\n")
-        return
     p = result["predicted"]
     print(f"\nYou picked: \"{result['title']}\" by {result['artist']}")
     print(f"  genre: {result['genre']}    source: {result['source']}")
-    print(f"\nPredicted mood")
-    print(f"  valence: {p['valence']}    energy: {p['energy']}")
-    print(f"  quadrant: {p['quadrant']}")
+    print(f"\nPredicted mood: valence={p['valence']}  energy={p['energy']}  ({p['quadrant']})")
     if "ground_truth" in result:
         gt = result["ground_truth"]
         print(f"  (Spotify true: valence={gt['valence']}, energy={gt['energy']})")

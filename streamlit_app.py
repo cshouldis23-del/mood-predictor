@@ -1,9 +1,4 @@
-"""Streamlit web UI for the Mood Predictor.
-
-Run locally:
-    pip install -r requirements.txt
-    streamlit run streamlit_app.py
-"""
+"""Streamlit web UI for the Mood Predictor."""
 import os
 import streamlit as st
 import pandas as pd
@@ -38,8 +33,8 @@ with st.sidebar:
         st.session_state["query"] = "https://open.spotify.com/track/23PvWFdi76vER4p1e2Xroj"
     if st.button("\U0001F3B6  drivers license (catalog)"):
         st.session_state["query"] = "drivers license by Olivia Rodrigo"
-    if st.button("\U0001F3B6  Take Me Out (catalog)"):
-        st.session_state["query"] = "Take Me Out by Franz Ferdinand"
+    if st.button("\U0001F3B6  Africa (peaceful)"):
+        st.session_state["query"] = "Africa by TOTO"
     if st.button("\U0001F3B6  Espresso (AI estimate)"):
         st.session_state["query"] = "Espresso by Sabrina Carpenter"
 
@@ -50,7 +45,7 @@ st.write(
     "vibe? Drop in a Spotify song URL that's been in your head, or type a "
     "song and the artist that appeals to you in this moment. I will predict "
     "the song's mood with a description, then recommend a song you might "
-    "also want to listen to as well as a song that's the opposite of your "
+    "also want to listen to as well as a song that is the opposite of your "
     "current mood — to change your day if you'd like.")
 
 @st.cache_resource
@@ -71,7 +66,6 @@ go = st.button("Go", type="primary")
 
 # ---- Helper: 2D plot ----
 def plot_mood_space(highlight_points):
-    """highlight_points: list of (label, valence, energy, color, marker, size)"""
     sample = engine._catalog.iloc[
         np.random.RandomState(0).choice(len(engine._catalog), 8000, replace=False)]
     fig, ax = plt.subplots(figsize=(8, 7))
@@ -138,6 +132,9 @@ if go and query.strip():
         highlights.append((f"contrast: {cr['title']}", cr["valence"], cr["energy"], "#E76F51", "o", 140))
     st.pyplot(plot_mood_space(highlights))
 
+    st.subheader("How this song feels")
+    st.write(result["description"])
+
     st.subheader("Recommendations")
     rec_a, rec_b = st.columns(2)
     if result.get("match_recommendation"):
@@ -153,9 +150,6 @@ if go and query.strip():
             st.markdown(f"“**{cr['title']}**”  by *{cr['artist']}*")
             st.caption(f"valence {cr['valence']}  ·  energy {cr['energy']}")
 
-    st.subheader("How this song feels")
-    st.write(result["description"])
-
     if "estimated_features" in result:
         with st.expander("AI-estimated audio features (input to your XGBoost)"):
             ef = result["estimated_features"]
@@ -170,7 +164,7 @@ if go and query.strip():
                 "3. The (valence, energy) shown was produced by **your XGBoost models** "
                 "when we built the catalog\n"
                 "4. **NearestNeighbors** picked match + contrast\n"
-                "5. **Claude wrote** the description")
+                "5. **Claude wrote** the mood description")
         else:
             st.markdown(
                 f"1. **Input parsed** as `\"{result['title']}\" by {result['artist']}`\n"
