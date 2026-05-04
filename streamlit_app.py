@@ -44,7 +44,7 @@ st.write(
     "Would you like to receive some song suggestions that suit your current "
     "vibe? Drop in a Spotify song URL that's been in your head, or type a "
     "song and the artist that appeals to you in this moment. I will predict "
-    "the song's mood with a description, then recommend a song you might "
+    "your mood with a description, then recommend a song you might "
     "also want to listen to as well as a song that is the opposite of your "
     "current mood — to change your day if you'd like.")
 
