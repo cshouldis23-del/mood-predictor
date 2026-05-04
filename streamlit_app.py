@@ -115,10 +115,21 @@ if go and query.strip():
         m1, m2 = st.columns(2)
         m1.metric("Valence (sad ↔ happy)",  f"{p['valence']:.3f}")
         m2.metric("Energy (calm ↔ intense)", f"{p['energy']:.3f}")
-        st.markdown(f"**Mood quadrant:** {p['quadrant']}")
         if "ground_truth" in result:
             gt = result["ground_truth"]
             st.caption(f"Spotify's true values: valence={gt['valence']}, energy={gt['energy']}")
+
+    # === Mood prediction (the headline) ===
+    st.markdown(
+        f"<div style='text-align:center; padding: 1.4em 0.8em; "
+        f"background-color: #f0f4f8; border-radius: 14px; "
+        f"margin: 1.2em 0; border: 1px solid #d8dde2;'>"
+        f"<div style='font-size: 1.0em; color:#666; letter-spacing:0.05em; "
+        f"text-transform:uppercase; margin-bottom:0.3em'>Mood prediction</div>"
+        f"<div style='font-size: 2.4em; font-weight:700; line-height:1.2'>"
+        f"{p['quadrant']}</div>"
+        f"</div>",
+        unsafe_allow_html=True)
 
     st.subheader("Where the song lives in the 2D mood space")
     highlights = [
