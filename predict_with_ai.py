@@ -271,11 +271,51 @@ def find_recommendations(pv, pe, exclude_artist=None, exclude_track_id=None,
     return out
 
 # ---------------- Public entry ----------------
+def _looks_like_gibberish(query):
+    """Local heuristic: detect obvious gibberish without needing the API.
+    Catches:
+      - empty / whitespace / emojis-only
+      - very short tokens (< 3 chars)
+      - tokens with no vowels (e.g. 'qwrtpx')
+      - keyboard-row mash ('asdfghjk', 'qwertyu', 'zxcvbnm', etc.)
+    Real song queries (with vowels and meaningful words) pass through.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    # Strip non-letters/digits/spaces; emoji and punctuation become whitespace
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", q).strip()
+    cleaned_compact = cleaned.replace(" ", "")
+    if len(cleaned_compact) < 3:
+        return True
+    letters_only = re.sub(r"[^a-z]", "", cleaned)
+    # No letters at all (e.g. "123") — treat as gibberish
+    if not letters_only:
+        return True
+    # No vowels at all in the query
+    if not re.search(r"[aeiouy]", letters_only):
+        return True
+    # Keyboard-row mashing: 5+ consecutive keys from the same QWERTY row
+    keyboard_rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
+    for row in keyboard_rows:
+        for i in range(len(row) - 4):
+            if row[i:i+5] in cleaned_compact:
+                return True
+    return False
+
 def predict(query):
     catalog = load_catalog()
     q = (query or "").strip()
     if not q:
         return {"kind": "error", "error": "Please enter a song name or Spotify URL."}
+
+    # Gibberish guard — catches obvious junk before it hits fuzzy / AI paths.
+    # Skip the check if the input is a Spotify URL or 22-char track ID.
+    if extract_track_id(q) is None and _looks_like_gibberish(q):
+        return {"kind": "error",
+                "error": "That doesn't look like a song to me. Try one of these:\n"
+                         "  - a Spotify track URL\n"
+                         "  - \"Title by Artist\" (e.g. \"Mr. Brightside by The Killers\")"}
 
     track_id = extract_track_id(q)
     if track_id:
