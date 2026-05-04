@@ -23,7 +23,7 @@ def load_catalog():
     global _catalog, _nn_index
     if _catalog is not None: return _catalog
     _catalog = pd.read_csv(CATALOG_PATH).reset_index(drop=True)
-    _nn_index = NearestNeighbors(n_neighbors=20, algorithm="ball_tree").fit(
+    _nn_index = NearestNeighbors(n_neighbors=200, algorithm="ball_tree").fit(
         _catalog[["pred_valence", "pred_energy"]].values)
     return _catalog
 
@@ -236,17 +236,38 @@ def predict_from_features(feats, artist):
     pe = float(np.clip(_models["energy"].predict(X)[0],  0, 1))
     return pv, pe
 
-def find_recommendations(pv, pe, exclude_artist=None, exclude_track_id=None, k=3):
+MIN_POPULARITY = 30  # filter recommendations so they're recognizable songs
+
+def find_recommendations(pv, pe, exclude_artist=None, exclude_track_id=None,
+                        k=1, min_popularity=MIN_POPULARITY):
+    """Search the catalog for the k nearest neighbors in (v, e) space,
+    filtering for popularity >= min_popularity. Falls back to relaxing the
+    popularity filter if fewer than k recognizable candidates exist."""
     catalog = load_catalog()
     target = np.array([[pv, pe]])
-    _, idxs = _nn_index.kneighbors(target, n_neighbors=20)
+    _, idxs = _nn_index.kneighbors(target, n_neighbors=200)
+    has_pop = "popularity" in catalog.columns
+    # First pass: popularity filter on
     out = []
     for i in idxs[0]:
         c = catalog.iloc[i]
         if exclude_track_id and c["track_id"] == exclude_track_id: continue
         if exclude_artist and c["artists"] == exclude_artist: continue
+        if has_pop and c["popularity"] < min_popularity: continue
+        if any(c["track_name"] == x["track_name"] and c["artists"] == x["artists"]
+               for x in out):
+            continue
         out.append(c)
         if len(out) >= k: break
+    # Fallback: if too few, relax the popularity filter
+    if len(out) < k:
+        for i in idxs[0]:
+            c = catalog.iloc[i]
+            if exclude_track_id and c["track_id"] == exclude_track_id: continue
+            if exclude_artist and c["artists"] == exclude_artist: continue
+            if any(c["track_id"] == x["track_id"] for x in out): continue
+            out.append(c)
+            if len(out) >= k: break
     return out
 
 # ---------------- Public entry ----------------
@@ -337,7 +358,8 @@ def _ai_song_path(artist, title):
 def _row_to_rec(r):
     return {"artist": r["artists"], "title": r["track_name"],
             "valence": round(float(r["pred_valence"]), 3),
-            "energy":  round(float(r["pred_energy"]),  3)}
+            "energy":  round(float(r["pred_energy"]),  3),
+            "popularity": int(r.get("popularity", 0))}
 
 def pretty_print(result):
     if result.get("kind") == "error" or "error" in result:
