@@ -108,14 +108,28 @@ def fuzzy_catalog_lookup(query):
     # Get top-15 candidates, then break ties by popularity so common queries
     # like "drivers license" go to Olivia Rodrigo's original instead of an
     # obscure cover with the same title.
-    candidates = process.extract(q, blobs, scorer=fuzz.WRatio,
-                                  limit=15, score_cutoff=72)
+    # token_set_ratio: based on the proportion of overlapping tokens
+    # between query and candidate. Stricter than WRatio (which over-rewards
+    # single-word substring matches like "Benson Boone" -> "George Benson").
+    # Cutoff 80 keeps typos in but rejects weak overlaps.
+    candidates = process.extract(q, blobs, scorer=fuzz.token_set_ratio,
+                                  limit=20, score_cutoff=80)
     if not candidates:
         return None
-    # candidates: list of (matched_string, score, idx)
-    # Among the top-scoring batch (score within 8 points of best), pick highest popularity
+    # Additional sanity check: at least half of the query's significant tokens
+    # (length > 2) must appear (substring) in the candidate blob. This blocks
+    # weird matches that token_set_ratio still lets through.
+    q_tokens = [t for t in q.split() if len(t) > 2]
+    if q_tokens:
+        def overlap(blob):
+            hits = sum(1 for t in q_tokens if t in blob)
+            return hits / len(q_tokens)
+        candidates = [c for c in candidates if overlap(c[0]) >= 0.5]
+        if not candidates:
+            return None
+    # Among the top-scoring batch (score within 5 of best), pick highest popularity
     top_score = candidates[0][1]
-    short_list = [c for c in candidates if c[1] >= top_score - 8]
+    short_list = [c for c in candidates if c[1] >= top_score - 5]
     has_pop = "popularity" in catalog.columns
     if has_pop and len(short_list) > 1:
         short_list.sort(key=lambda c: (-int(catalog.iloc[c[2]].get("popularity", 0)),
