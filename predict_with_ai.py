@@ -162,6 +162,45 @@ def _mock_claude(prompt):
             "plane.\n\n[mock match rationale] Same emotional zone.\n\n"
             "[mock contrast rationale] Diagonally opposite in mood.")
 
+def claude_identify_song(artist_hint, title_hint):
+    """Ask Claude whether the input is a real song and, if so, return its
+    canonical artist+title. Returns a dict:
+       {"is_song": True,  "artist": "...", "title": "..."}
+       {"is_song": False}
+    On API error or mock mode, falls back to assuming it's a song (so the
+    pipeline degrades gracefully rather than rejecting valid inputs).
+    """
+    if USE_MOCK_AI:
+        # Without an API key, trust the input. The local heuristic guard in
+        # predict() already catches the obvious junk before this point.
+        return {"is_song": True,
+                "artist": artist_hint or "",
+                "title": title_hint or artist_hint or ""}
+    raw = (f"{title_hint} by {artist_hint}" if artist_hint else title_hint).strip()
+    prompt = (
+        f"Is the following user input a real song? Output ONLY a JSON object:\n"
+        f'  {{"is_song": true, "artist": "<canonical artist>", "title": "<canonical title>"}}\n'
+        f"if it is a real song you recognize, OR\n"
+        f'  {{"is_song": false}}\n'
+        f"if it is gibberish, a mood description, an album/playlist name, or anything other than a single song.\n\n"
+        f'Input: """{raw}"""'
+    )
+    try:
+        text = claude_call(prompt, max_tokens=120,
+            system="You identify songs from short text inputs. Output only JSON.")
+        m = re.search(r"\{.*?\}", text, re.DOTALL)
+        if not m:
+            return {"is_song": True, "artist": artist_hint or "", "title": title_hint}
+        data = json.loads(m.group(0))
+        if not data.get("is_song", False):
+            return {"is_song": False}
+        return {"is_song": True,
+                "artist": data.get("artist", artist_hint) or artist_hint,
+                "title":  data.get("title",  title_hint)  or title_hint}
+    except Exception:
+        # Network/parse error -- don't block the user, treat as song
+        return {"is_song": True, "artist": artist_hint or "", "title": title_hint}
+
 def claude_estimate_features(artist, title):
     prompt = (
         f"Estimate Spotify audio features for \"{title}\" by {artist}.\n\n"
@@ -373,6 +412,16 @@ def _build_song_result_from_catalog(row):
 def _ai_song_path(artist, title):
     if not (artist or title):
         return {"kind": "error", "error": "I couldn't extract an artist or title."}
+    # Claude validation: is this actually a song?  Catches gibberish and
+    # non-song text that the local heuristic and fuzzy matcher missed.
+    check = claude_identify_song(artist, title)
+    if not check["is_song"]:
+        return {"kind": "error",
+                "error": "That doesn't look like a real song to me. Try one of these:\n"
+                         "  - a Spotify track URL\n"
+                         "  - \"Title by Artist\" (e.g. \"Mr. Brightside by The Killers\")"}
+    artist = check["artist"] or artist
+    title  = check["title"]  or title
     feats = claude_estimate_features(artist, title)
     pv, pe = predict_from_features(feats, artist)
     matches  = find_recommendations(pv, pe, exclude_artist=artist, k=1)
