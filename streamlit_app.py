@@ -35,8 +35,8 @@ with st.sidebar:
         st.session_state["query"] = "drivers license by Olivia Rodrigo"
     if st.button("\U0001F3B6  Africa (peaceful)"):
         st.session_state["query"] = "Africa by TOTO"
-    if st.button("\U0001F3B6  Espresso (AI estimate)"):
-        st.session_state["query"] = "Espresso by Sabrina Carpenter"
+    if st.button("\U0001F3B6  Crystal Baller (AI estimate)"):
+        st.session_state["query"] = "Crystal Baller by Third Eye Blind"
 
 # ---- Header ----
 st.title("\U0001F3B5 Mood Predictor")
